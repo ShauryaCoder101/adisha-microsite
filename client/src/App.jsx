@@ -7,7 +7,7 @@ import AdishaPage from './pages/AdishaPage';
 import AdminPage from './pages/AdminPage';
 import './index.css';
 
-const API_BASE = 'http://localhost:3001';
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001';
 
 function App() {
   return (
