@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+*.db
+uploads/
+temp/
+.DS_Store
+PNG-LOGOS-ADISHA/
+*.JPG
+*.jpeg
+*.zip
+Better Together*
