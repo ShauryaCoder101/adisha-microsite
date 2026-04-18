@@ -17,15 +17,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // ── Middleware ──
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin || origin.startsWith('http://localhost') || origin.includes('vercel.app') || origin.includes('adisha.net')) {
-      callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
-    }
-  }
-}));
+app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
 // Serve uploaded files statically
