@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import fs from 'fs';
 import path from 'path';
@@ -69,6 +69,38 @@ export async function deleteFromS3(s3Key) {
  */
 export function isS3Configured() {
   return !!(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY && process.env.S3_BUCKET_NAME);
+}
+
+/**
+ * List all photos in the S3 bucket
+ */
+export async function listS3Photos(prefix = 'photos/') {
+  const photos = [];
+  let continuationToken;
+
+  do {
+    const command = new ListObjectsV2Command({
+      Bucket: BUCKET,
+      Prefix: prefix,
+      ContinuationToken: continuationToken,
+    });
+    const response = await s3Client.send(command);
+    
+    if (response.Contents) {
+      for (const obj of response.Contents) {
+        if (obj.Key === prefix) continue; // skip the folder itself
+        photos.push({
+          key: obj.Key,
+          url: `https://${BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${obj.Key}`,
+          filename: obj.Key.replace(prefix, ''),
+          size: obj.Size,
+        });
+      }
+    }
+    continuationToken = response.NextContinuationToken;
+  } while (continuationToken);
+
+  return photos;
 }
 
 export { s3Client, BUCKET };

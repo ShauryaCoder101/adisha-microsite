@@ -13,6 +13,8 @@ import faceSearchRoutes from './routes/faceSearch.js';
 import snippetsRoutes from './routes/snippets.js';
 import coupleRoutes from './routes/couple.js';
 
+import { isS3Configured, listS3Photos } from './services/s3Service.js';
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 
@@ -34,9 +36,48 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+/**
+ * Rebuild SQLite photo records from S3 bucket on startup.
+ * This ensures the DB is always in sync even after a redeploy wipes SQLite.
+ */
+async function rebuildPhotosFromS3() {
+  if (!isS3Configured()) {
+    console.log('   ⬜ S3 not configured, skipping DB rebuild');
+    return;
+  }
+
+  const { dbAll, dbRun } = await import('./db/database.js');
+  const existingPhotos = dbAll('SELECT COUNT(*) as count FROM photos');
+  const count = existingPhotos[0]?.count || 0;
+
+  if (count > 0) {
+    console.log(`   ✅ Database has ${count} photos, skipping rebuild`);
+    return;
+  }
+
+  console.log('   🔄 Database empty — rebuilding from S3...');
+  try {
+    const s3Photos = await listS3Photos('photos/');
+    console.log(`   📦 Found ${s3Photos.length} photos in S3`);
+
+    for (const photo of s3Photos) {
+      const photoId = photo.filename.replace(/\.[^.]+$/, ''); // strip extension
+      dbRun(
+        `INSERT OR IGNORE INTO photos (id, filename, s3_key, s3_url, local_path, face_ids) VALUES (?, ?, ?, ?, ?, ?)`,
+        [photoId, photo.filename, photo.key, photo.url, null, '[]']
+      );
+    }
+
+    console.log(`   ✅ Rebuilt ${s3Photos.length} photo records from S3`);
+  } catch (err) {
+    console.error('   ❌ S3 rebuild failed:', err.message);
+  }
+}
+
 // ── Initialize & Start ──
 async function start() {
   await initDB();
+  await rebuildPhotosFromS3();
 
   app.listen(PORT, () => {
     console.log(`\n🚀 Niva Bupa Microsite Server`);
