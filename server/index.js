@@ -74,10 +74,60 @@ async function rebuildPhotosFromS3() {
   }
 }
 
+/**
+ * Rebuild couple profiles from S3 on startup.
+ * Reads the match JSON files saved by set-profile and restores them.
+ */
+async function rebuildCoupleProfilesFromS3() {
+  if (!isS3Configured()) return;
+
+  const { dbAll, dbRun } = await import('./db/database.js');
+  const existingProfiles = dbAll('SELECT COUNT(*) as count FROM couple_profiles');
+  const count = existingProfiles[0]?.count || 0;
+
+  if (count > 0) {
+    console.log(`   ✅ Couple profiles: ${count} profiles loaded`);
+    return;
+  }
+
+  console.log('   🔄 Rebuilding couple profiles from S3...');
+  try {
+    const profileFiles = await listS3Photos('profiles/');
+    const matchFiles = profileFiles.filter(f => f.filename.endsWith('_matches.json'));
+
+    for (const file of matchFiles) {
+      try {
+        // Download the match JSON from S3
+        const { GetObjectCommand } = await import('@aws-sdk/client-s3');
+        const { s3Client, BUCKET } = await import('../services/s3Service.js');
+        const response = await s3Client.send(new GetObjectCommand({ Bucket: BUCKET, Key: file.key }));
+        const body = await response.Body.transformToString();
+        const data = JSON.parse(body);
+
+        // Find the selfie file
+        const nameId = data.name.toLowerCase();
+        const selfieFile = profileFiles.find(f => f.filename.startsWith(nameId) && !f.filename.endsWith('.json'));
+        const selfiePath = selfieFile ? selfieFile.url : null;
+
+        dbRun(
+          'INSERT OR IGNORE INTO couple_profiles (id, name, selfie_path, matched_photo_ids) VALUES (?, ?, ?, ?)',
+          [nameId, data.name, selfiePath, JSON.stringify(data.matchedPhotoIds)]
+        );
+        console.log(`   ✅ Restored profile: ${data.name} (${data.matchedPhotoIds.length} matches)`);
+      } catch (err) {
+        console.error(`   ❌ Failed to restore profile from ${file.key}:`, err.message);
+      }
+    }
+  } catch (err) {
+    console.error('   ❌ Couple profile rebuild failed:', err.message);
+  }
+}
+
 // ── Initialize & Start ──
 async function start() {
   await initDB();
   await rebuildPhotosFromS3();
+  await rebuildCoupleProfilesFromS3();
 
   app.listen(PORT, () => {
     console.log(`\n🚀 Niva Bupa Microsite Server`);

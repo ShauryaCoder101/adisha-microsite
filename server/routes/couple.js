@@ -5,7 +5,7 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { dbRun, dbAll, dbGet } from '../db/database.js';
 import { searchFaces, isRekognitionConfigured } from '../services/rekognitionService.js';
-import { getPresignedUrl } from '../services/s3Service.js';
+import { getPresignedUrl, uploadBufferToS3, listS3Photos } from '../services/s3Service.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const router = Router();
@@ -50,17 +50,38 @@ router.post('/set-profile', upload.single('selfie'), async (req, res) => {
     // Get unique photo IDs from matches
     const matchedPhotoIds = [...new Set(matches.map((m) => m.externalImageId))];
 
-    // Upsert the profile
+    // Upload selfie to S3 for persistence
+    const s3SelfieKey = `profiles/${name.toLowerCase()}${path.extname(req.file.originalname)}`;
+    let s3SelfieUrl = null;
+    try {
+      s3SelfieUrl = await uploadBufferToS3(imageBuffer, s3SelfieKey, req.file.mimetype);
+      console.log(`  Selfie uploaded to S3: ${s3SelfieKey}`);
+    } catch (err) {
+      console.error(`  S3 selfie upload failed: ${err.message}`);
+    }
+
+    // Save matched photo IDs as a JSON file on S3 for persistence
+    const matchDataKey = `profiles/${name.toLowerCase()}_matches.json`;
+    try {
+      const matchData = JSON.stringify({ name, matchedPhotoIds, updatedAt: new Date().toISOString() });
+      await uploadBufferToS3(Buffer.from(matchData), matchDataKey, 'application/json');
+      console.log(`  Match data saved to S3: ${matchDataKey}`);
+    } catch (err) {
+      console.error(`  S3 match data save failed: ${err.message}`);
+    }
+
+    // Upsert the profile in SQLite
+    const selfiePath = s3SelfieUrl || `/uploads/profiles/${req.file.filename}`;
     const existing = dbGet('SELECT * FROM couple_profiles WHERE id = ?', [name.toLowerCase()]);
     if (existing) {
       dbRun(
         'UPDATE couple_profiles SET name = ?, selfie_path = ?, matched_photo_ids = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-        [name, `/uploads/profiles/${req.file.filename}`, JSON.stringify(matchedPhotoIds), name.toLowerCase()]
+        [name, selfiePath, JSON.stringify(matchedPhotoIds), name.toLowerCase()]
       );
     } else {
       dbRun(
         'INSERT INTO couple_profiles (id, name, selfie_path, matched_photo_ids) VALUES (?, ?, ?, ?)',
-        [name.toLowerCase(), name, `/uploads/profiles/${req.file.filename}`, JSON.stringify(matchedPhotoIds)]
+        [name.toLowerCase(), name, selfiePath, JSON.stringify(matchedPhotoIds)]
       );
     }
 
@@ -127,23 +148,12 @@ router.get('/photos', async (req, res) => {
     const placeholders = idArray.map(() => '?').join(',');
     const photos = dbAll(`SELECT * FROM photos WHERE id IN (${placeholders})`, idArray);
 
-    // Generate presigned URLs for S3 photos, or use local paths
-    const results = [];
-    for (const photo of photos) {
-      let url = photo.local_path;
-      if (photo.s3_key) {
-        try {
-          url = await getPresignedUrl(photo.s3_key, 7200);
-        } catch {
-          url = photo.local_path;
-        }
-      }
-      results.push({
-        id: photo.id,
-        filename: photo.filename,
-        url,
-      });
-    }
+    // Use direct S3 URLs (bucket has public read policy)
+    const results = photos.map((photo) => ({
+      id: photo.id,
+      filename: photo.filename,
+      url: photo.s3_url || photo.local_path,
+    }));
 
     res.json({ success: true, photos: results, total: results.length });
   } catch (err) {
