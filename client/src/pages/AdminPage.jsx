@@ -153,8 +153,8 @@ export default function AdminPage({ apiBase }) {
 
     try {
       const formData = new FormData();
-      formData.append('selfie', file);
       formData.append('name', name);
+      formData.append('selfie', file);
 
       const res = await fetch(`${apiBase}/api/couple/set-profile`, {
         method: 'POST',
@@ -186,6 +186,12 @@ export default function AdminPage({ apiBase }) {
       error: 'error',
     };
     return colors[s] || 'uploaded';
+  };
+
+  const getSelfieUrl = (id) => {
+    const profile = coupleProfiles.find(p => p.id === id);
+    if (!profile?.selfiePath) return '';
+    return profile.selfiePath.startsWith('http') ? profile.selfiePath : `${apiBase}${profile.selfiePath}`;
   };
 
   return (
@@ -327,7 +333,7 @@ export default function AdminPage({ apiBase }) {
               {coupleProfiles.find(p => p.id === 'aditya') ? (
                 <div>
                   <img
-                    src={`${apiBase}${coupleProfiles.find(p => p.id === 'aditya').selfiePath}`}
+                    src={getSelfieUrl('aditya')}
                     alt="Aditya"
                     style={{ width: '100px', height: '100px', borderRadius: '50%', objectFit: 'cover', border: '3px solid var(--color-accent-primary)', marginBottom: 'var(--space-sm)' }}
                   />
@@ -363,7 +369,7 @@ export default function AdminPage({ apiBase }) {
               {coupleProfiles.find(p => p.id === 'disha') ? (
                 <div>
                   <img
-                    src={`${apiBase}${coupleProfiles.find(p => p.id === 'disha').selfiePath}`}
+                    src={getSelfieUrl('disha')}
                     alt="Disha"
                     style={{ width: '100px', height: '100px', borderRadius: '50%', objectFit: 'cover', border: '3px solid var(--color-accent-primary)', marginBottom: 'var(--space-sm)' }}
                   />

@@ -7,13 +7,15 @@ dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
 import express from 'express';
 import cors from 'cors';
-import { initDB } from './db/database.js';
+import { initDB, dbAll, dbRun } from './db/database.js';
 import adminRoutes from './routes/admin.js';
 import faceSearchRoutes from './routes/faceSearch.js';
 import snippetsRoutes from './routes/snippets.js';
 import coupleRoutes from './routes/couple.js';
 
-import { isS3Configured, listS3Photos } from './services/s3Service.js';
+import { isS3Configured, listS3Photos, uploadBufferToS3, getS3Client, getBucket } from './services/s3Service.js';
+import { searchFaces, isRekognitionConfigured } from './services/rekognitionService.js';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -46,7 +48,6 @@ async function rebuildPhotosFromS3() {
     return;
   }
 
-  const { dbAll, dbRun } = await import('./db/database.js');
   const existingPhotos = dbAll('SELECT COUNT(*) as count FROM photos');
   const count = existingPhotos[0]?.count || 0;
 
@@ -81,7 +82,6 @@ async function rebuildPhotosFromS3() {
 async function rebuildCoupleProfilesFromS3() {
   if (!isS3Configured()) return;
 
-  const { dbAll, dbRun } = await import('./db/database.js');
   const existingProfiles = dbAll('SELECT COUNT(*) as count FROM couple_profiles');
   const count = existingProfiles[0]?.count || 0;
 
@@ -95,27 +95,67 @@ async function rebuildCoupleProfilesFromS3() {
     const profileFiles = await listS3Photos('profiles/');
     const matchFiles = profileFiles.filter(f => f.filename.endsWith('_matches.json'));
 
-    for (const file of matchFiles) {
-      try {
-        // Download the match JSON from S3
-        const { GetObjectCommand } = await import('@aws-sdk/client-s3');
-        const { s3Client, BUCKET } = await import('../services/s3Service.js');
-        const response = await s3Client.send(new GetObjectCommand({ Bucket: BUCKET, Key: file.key }));
-        const body = await response.Body.transformToString();
-        const data = JSON.parse(body);
+    if (matchFiles.length > 0) {
+      // ── Strategy 1: Restore from cached match-data JSON files ──
+      for (const file of matchFiles) {
+        try {
+          const response = await getS3Client().send(new GetObjectCommand({ Bucket: getBucket(), Key: file.key }));
+          const body = await response.Body.transformToString();
+          const data = JSON.parse(body);
 
-        // Find the selfie file
-        const nameId = data.name.toLowerCase();
-        const selfieFile = profileFiles.find(f => f.filename.startsWith(nameId) && !f.filename.endsWith('.json'));
-        const selfiePath = selfieFile ? selfieFile.url : null;
+          const nameId = data.name.toLowerCase();
+          const selfieFile = profileFiles.find(f => f.filename.startsWith(nameId) && !f.filename.endsWith('.json'));
+          const selfiePath = selfieFile ? selfieFile.url : null;
 
-        dbRun(
-          'INSERT OR IGNORE INTO couple_profiles (id, name, selfie_path, matched_photo_ids) VALUES (?, ?, ?, ?)',
-          [nameId, data.name, selfiePath, JSON.stringify(data.matchedPhotoIds)]
-        );
-        console.log(`   ✅ Restored profile: ${data.name} (${data.matchedPhotoIds.length} matches)`);
-      } catch (err) {
-        console.error(`   ❌ Failed to restore profile from ${file.key}:`, err.message);
+          dbRun(
+            'INSERT OR IGNORE INTO couple_profiles (id, name, selfie_path, matched_photo_ids) VALUES (?, ?, ?, ?)',
+            [nameId, data.name, selfiePath, JSON.stringify(data.matchedPhotoIds)]
+          );
+          console.log(`   ✅ Restored profile: ${data.name} (${data.matchedPhotoIds.length} matches)`);
+        } catch (err) {
+          console.error(`   ❌ Failed to restore profile from ${file.key}:`, err.message);
+        }
+      }
+    } else {
+      // ── Strategy 2: Re-run Rekognition face matching from selfie images on S3 ──
+      console.log('   ⚠️  No match data JSONs found — attempting face re-match from selfie images...');
+      const selfieImages = profileFiles.filter(f => !f.filename.endsWith('.json'));
+
+      if (selfieImages.length > 0 && isRekognitionConfigured()) {
+        for (const selfie of selfieImages) {
+          try {
+            const nameFromFile = selfie.filename.replace(/\.[^.]+$/, '');
+            const name = nameFromFile.charAt(0).toUpperCase() + nameFromFile.slice(1);
+
+            // Download selfie image from S3
+            const response = await getS3Client().send(new GetObjectCommand({ Bucket: getBucket(), Key: selfie.key }));
+            const chunks = [];
+            for await (const chunk of response.Body) {
+              chunks.push(chunk);
+            }
+            const imageBuffer = Buffer.concat(chunks);
+
+            // Run Rekognition face search against indexed photos
+            const matches = await searchFaces(imageBuffer, 80, 100);
+            const matchedPhotoIds = [...new Set(matches.map(m => m.externalImageId))];
+
+            // Persist to SQLite
+            dbRun(
+              'INSERT OR IGNORE INTO couple_profiles (id, name, selfie_path, matched_photo_ids) VALUES (?, ?, ?, ?)',
+              [nameFromFile, name, selfie.url, JSON.stringify(matchedPhotoIds)]
+            );
+
+            // Cache match data back to S3 for faster restores next time
+            const matchData = JSON.stringify({ name, matchedPhotoIds, updatedAt: new Date().toISOString() });
+            await uploadBufferToS3(Buffer.from(matchData), `profiles/${nameFromFile}_matches.json`, 'application/json');
+
+            console.log(`   ✅ Re-matched profile: ${name} (${matchedPhotoIds.length} photos)`);
+          } catch (err) {
+            console.error(`   ❌ Failed to re-match from ${selfie.key}:`, err.message);
+          }
+        }
+      } else {
+        console.log('   ⬜ No selfie images on S3 or Rekognition not configured — skipping');
       }
     }
   } catch (err) {

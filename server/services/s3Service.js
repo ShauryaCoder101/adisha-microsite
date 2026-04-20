@@ -3,43 +3,55 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import fs from 'fs';
 import path from 'path';
 
-const s3Client = new S3Client({
-  region: process.env.AWS_REGION || 'ap-south-1',
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  },
-});
+// Lazy-initialized client (credentials aren't available at import time due to ESM hoisting)
+let _s3Client = null;
 
-const BUCKET = process.env.S3_BUCKET_NAME || 'niva-bupa-event';
+function getClient() {
+  if (!_s3Client) {
+    _s3Client = new S3Client({
+      region: process.env.AWS_REGION || 'ap-south-1',
+      credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+      },
+    });
+  }
+  return _s3Client;
+}
+
+function getBucket() {
+  return process.env.S3_BUCKET_NAME || 'niva-bupa-event';
+}
 
 /**
  * Upload a file to S3
  */
 export async function uploadToS3(filePath, s3Key, contentType) {
+  const bucket = getBucket();
   const fileBuffer = fs.readFileSync(filePath);
   const command = new PutObjectCommand({
-    Bucket: BUCKET,
+    Bucket: bucket,
     Key: s3Key,
     Body: fileBuffer,
     ContentType: contentType,
   });
-  await s3Client.send(command);
-  return `https://${BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${s3Key}`;
+  await getClient().send(command);
+  return `https://${bucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${s3Key}`;
 }
 
 /**
  * Upload from buffer to S3
  */
 export async function uploadBufferToS3(buffer, s3Key, contentType) {
+  const bucket = getBucket();
   const command = new PutObjectCommand({
-    Bucket: BUCKET,
+    Bucket: bucket,
     Key: s3Key,
     Body: buffer,
     ContentType: contentType,
   });
-  await s3Client.send(command);
-  return `https://${BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${s3Key}`;
+  await getClient().send(command);
+  return `https://${bucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${s3Key}`;
 }
 
 /**
@@ -47,10 +59,10 @@ export async function uploadBufferToS3(buffer, s3Key, contentType) {
  */
 export async function getPresignedUrl(s3Key, expiresInSeconds = 3600) {
   const command = new GetObjectCommand({
-    Bucket: BUCKET,
+    Bucket: getBucket(),
     Key: s3Key,
   });
-  return await getSignedUrl(s3Client, command, { expiresIn: expiresInSeconds });
+  return await getSignedUrl(getClient(), command, { expiresIn: expiresInSeconds });
 }
 
 /**
@@ -58,10 +70,10 @@ export async function getPresignedUrl(s3Key, expiresInSeconds = 3600) {
  */
 export async function deleteFromS3(s3Key) {
   const command = new DeleteObjectCommand({
-    Bucket: BUCKET,
+    Bucket: getBucket(),
     Key: s3Key,
   });
-  await s3Client.send(command);
+  await getClient().send(command);
 }
 
 /**
@@ -75,23 +87,24 @@ export function isS3Configured() {
  * List all photos in the S3 bucket
  */
 export async function listS3Photos(prefix = 'photos/') {
+  const bucket = getBucket();
   const photos = [];
   let continuationToken;
 
   do {
     const command = new ListObjectsV2Command({
-      Bucket: BUCKET,
+      Bucket: bucket,
       Prefix: prefix,
       ContinuationToken: continuationToken,
     });
-    const response = await s3Client.send(command);
+    const response = await getClient().send(command);
     
     if (response.Contents) {
       for (const obj of response.Contents) {
         if (obj.Key === prefix) continue; // skip the folder itself
         photos.push({
           key: obj.Key,
-          url: `https://${BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${obj.Key}`,
+          url: `https://${bucket}.s3.${process.env.AWS_REGION}.amazonaws.com/${obj.Key}`,
           filename: obj.Key.replace(prefix, ''),
           size: obj.Size,
         });
@@ -103,4 +116,5 @@ export async function listS3Photos(prefix = 'photos/') {
   return photos;
 }
 
-export { s3Client, BUCKET };
+// Export getters for use in index.js rebuild functions
+export { getClient as getS3Client, getBucket };
